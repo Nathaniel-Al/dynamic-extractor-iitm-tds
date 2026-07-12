@@ -16,6 +16,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "service": "dynamic-extract"
+    }
+
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -57,7 +64,12 @@ Text:
 
 {req.text}
 
-Return ONLY JSON.
+Return ONLY a valid JSON object.
+
+No markdown.
+No code fences.
+No explanation.
+No text before or after the JSON.
 """
 
     response = client.chat.completions.create(
@@ -68,12 +80,13 @@ Return ONLY JSON.
                 "role": "user",
                 "content": prompt
             }
-        ],
-        response_format={"type":"json_object"}
+        ]
     )
-
-    data = json.loads(response.choices[0].message.content)
-
+    
+    content = response.choices[0].message.content
+    print(content)
+    data = json.loads(content)
+    
     result = {}
 
     for key, typ in req.schema.items():
