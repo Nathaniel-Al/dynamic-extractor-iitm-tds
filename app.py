@@ -21,7 +21,7 @@ client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
-MODEL = "google/gemma-4-27b-it:free"
+MODEL = "openai/gpt-oss-120b:free"
 
 
 class RequestBody(BaseModel):
