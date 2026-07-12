@@ -29,8 +29,10 @@ client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
-MODEL = "openai/gpt-oss-120b:free"
-
+MODEL = os.getenv(
+    "OPENROUTER_MODEL",
+    "google/gemma-4-26b-a4b-it:free"
+)
 
 class RequestBody(BaseModel):
     text: str
@@ -52,24 +54,39 @@ CITY_SUFFIXES = [
 
 
 def clean_string(field, value):
-    if value is None:
-        return None
-
-    if not isinstance(value, str):
+    if value is None or not isinstance(value, str):
         return value
 
     value = value.strip()
-
     field = field.lower()
 
-    if any(x in field for x in ["origin", "destination", "city", "location"]):
-        for suffix in CITY_SUFFIXES:
+    # Only clean location-like fields
+    location_fields = {
+        "origin",
+        "destination",
+        "city",
+        "location",
+        "state",
+        "country"
+    }
+
+    if field in location_fields:
+        suffixes = [
+            " warehouse",
+            " office",
+            " branch",
+            " depot",
+            " hub",
+            " center",
+            " centre"
+        ]
+
+        for suffix in suffixes:
             if value.lower().endswith(suffix):
                 value = value[:-len(suffix)].strip()
 
     return value
-
-
+    
 @app.post("/dynamic-extract")
 def dynamic_extract(req: RequestBody):
 
@@ -97,9 +114,15 @@ Return the canonical value only.
 Remove unnecessary descriptive words.
 
 Examples:
+Return the exact field value.
+
+Only remove location descriptors like:
 "Mumbai warehouse" -> "Mumbai"
-"Delhi office" -> "Delhi"
-"approved leave request" -> "approved"
+
+Do not shorten field values such as:
+"sick leave"
+"running shoes"
+"Alpha Store"
 
 integer:
 Return JSON integer.
