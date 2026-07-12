@@ -4,8 +4,9 @@ from pydantic import BaseModel, Field
 from typing import Dict
 import os
 import json
+import time
 import traceback
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 app = FastAPI()
 
@@ -29,10 +30,16 @@ client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
-MODEL = os.getenv(
-    "OPENROUTER_MODEL",
-    "google/gemma-4-26b-a4b-it:free"
-)
+# Comma separated list in Render env:
+# OPENROUTER_MODELS=google/gemma-4-26b-a4b-it:free,meta-llama/llama-3.3-70b-instruct:free,openai/gpt-oss-120b:free
+MODELS = [
+    m.strip()
+    for m in os.getenv(
+        "OPENROUTER_MODELS",
+        "google/gemma-4-26b-a4b-it:free,meta-llama/llama-3.3-70b-instruct:free,openai/gpt-oss-120b:free"
+    ).split(",")
+]
+
 
 class RequestBody(BaseModel):
     text: str
@@ -42,7 +49,7 @@ class RequestBody(BaseModel):
         populate_by_name = True
 
 
-CITY_SUFFIXES = [
+LOCATION_SUFFIXES = [
     " warehouse",
     " office",
     " branch",
@@ -53,94 +60,77 @@ CITY_SUFFIXES = [
 ]
 
 
-def clean_string(field, value):
-    if value is None or not isinstance(value, str):
+def clean_string(field_name: str, value):
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
         return value
 
     value = value.strip()
-    field = field.lower()
 
-    # Only clean location-like fields
-    location_fields = {
+    # ONLY clean location-related fields
+    if field_name.lower() in {
         "origin",
         "destination",
         "city",
         "location",
         "state",
-        "country"
-    }
-
-    if field in location_fields:
-        suffixes = [
-            " warehouse",
-            " office",
-            " branch",
-            " depot",
-            " hub",
-            " center",
-            " centre"
-        ]
-
-        for suffix in suffixes:
+        "country",
+    }:
+        for suffix in LOCATION_SUFFIXES:
             if value.lower().endswith(suffix):
                 value = value[:-len(suffix)].strip()
+                break
 
     return value
-    
+
+
 @app.post("/dynamic-extract")
 def dynamic_extract(req: RequestBody):
 
     try:
 
         prompt = f"""
-You are a deterministic information extraction engine.
+You are an information extraction engine.
 
-Extract information from the text.
+Return ONLY a valid JSON object.
 
-IMPORTANT RULES
+Rules:
 
-- Return ONLY valid JSON.
-- No markdown.
-- No code fences.
-- No explanation.
-- Return EXACTLY the keys in the schema.
-- Never add extra keys.
+- Return EXACTLY the keys from the schema.
+- Never return extra keys.
 - Missing values must be null.
+- Return integers as JSON integers.
+- Return floats as JSON numbers.
+- Return booleans as true/false.
+- Dates must be YYYY-MM-DD.
+- Arrays must be JSON arrays.
+- No markdown.
+- No explanations.
+- No code fences.
 
-TYPE RULES
+IMPORTANT
 
-string:
-Return the canonical value only.
-Remove unnecessary descriptive words.
-
-Examples:
 Return the exact field value.
 
-Only remove location descriptors like:
+Only normalize location fields.
+
+Examples:
+
+origin:
 "Mumbai warehouse" -> "Mumbai"
 
-Do not shorten field values such as:
+destination:
+"Delhi office" -> "Delhi"
+
+Do NOT shorten values such as:
+
 "sick leave"
 "running shoes"
 "Alpha Store"
-
-integer:
-Return JSON integer.
-
-float:
-Return JSON number.
-
-boolean:
-Return true or false.
-
-date:
-Return ISO format YYYY-MM-DD.
-
-array[string]:
-Return JSON array.
-
-array[integer]:
-Return JSON array.
+"BlueDart"
+"approved"
 
 Schema:
 
@@ -151,25 +141,82 @@ Text:
 {req.text}
 """
 
-        response = client.chat.completions.create(
-            model=MODEL,
-            temperature=0,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        )
+        response = None
+        last_error = None
+
+        # Try every configured model
+        for model in MODELS:
+
+            print(f"Trying model: {model}")
+
+            for attempt in range(3):
+
+                try:
+
+                    response = client.chat.completions.create(
+                        model=model,
+                        temperature=0,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": prompt,
+                            }
+                        ],
+                    )
+
+                    print(f"Success using {model}")
+
+                    break
+
+                except RateLimitError as e:
+
+                    last_error = e
+
+                    retry = 30
+
+                    try:
+                        retry = int(
+                            e.response.headers.get(
+                                "Retry-After",
+                                "30"
+                            )
+                        )
+                    except Exception:
+                        pass
+
+                    print(
+                        f"Rate limited on {model}. "
+                        f"Retrying in {retry}s..."
+                    )
+
+                    time.sleep(retry)
+
+                except Exception as e:
+
+                    print(e)
+
+                    last_error = e
+
+                    break
+
+            if response is not None:
+                break
+
+        if response is None:
+            raise last_error
 
         content = response.choices[0].message.content.strip()
 
         print(content)
 
+        # Remove markdown if model returns ```json
         if content.startswith("```"):
+
             content = content.split("```")[1]
+
             if content.startswith("json"):
                 content = content[4:]
+
             content = content.strip()
 
         data = json.loads(content)
@@ -216,5 +263,7 @@ Text:
         return result
 
     except Exception:
+
         print(traceback.format_exc())
+
         raise
