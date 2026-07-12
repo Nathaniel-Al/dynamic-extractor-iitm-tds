@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict, Any
+from pydantic import BaseModel, Field
+from typing import Dict
 import os
 import json
+import traceback
 from openai import OpenAI
 
 app = FastAPI()
@@ -33,96 +34,164 @@ MODEL = "openai/gpt-oss-120b:free"
 
 class RequestBody(BaseModel):
     text: str
-    schema: Dict[str, str]
+    schema_: Dict[str, str] = Field(alias="schema")
+
+    class Config:
+        populate_by_name = True
+
+
+CITY_SUFFIXES = [
+    " warehouse",
+    " office",
+    " branch",
+    " depot",
+    " hub",
+    " center",
+    " centre",
+]
+
+
+def clean_string(field, value):
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
+        return value
+
+    value = value.strip()
+
+    field = field.lower()
+
+    if any(x in field for x in ["origin", "destination", "city", "location"]):
+        for suffix in CITY_SUFFIXES:
+            if value.lower().endswith(suffix):
+                value = value[:-len(suffix)].strip()
+
+    return value
 
 
 @app.post("/dynamic-extract")
 def dynamic_extract(req: RequestBody):
 
-    prompt = f"""
-You are a strict information extraction engine.
+    try:
 
-Extract ONLY the requested fields.
+        prompt = f"""
+You are a deterministic information extraction engine.
 
-Rules:
+Extract information from the text.
 
-- Return EXACTLY the keys from schema.
-- No additional keys.
-- Missing values -> null.
-- integer -> JSON integer.
-- float -> JSON number.
-- boolean -> true/false.
-- date -> YYYY-MM-DD.
-- array[string] -> JSON array of strings.
-- array[integer] -> JSON array of integers.
+IMPORTANT RULES
+
+- Return ONLY valid JSON.
+- No markdown.
+- No code fences.
+- No explanation.
+- Return EXACTLY the keys in the schema.
+- Never add extra keys.
+- Missing values must be null.
+
+TYPE RULES
+
+string:
+Return the canonical value only.
+Remove unnecessary descriptive words.
+
+Examples:
+"Mumbai warehouse" -> "Mumbai"
+"Delhi office" -> "Delhi"
+"approved leave request" -> "approved"
+
+integer:
+Return JSON integer.
+
+float:
+Return JSON number.
+
+boolean:
+Return true or false.
+
+date:
+Return ISO format YYYY-MM-DD.
+
+array[string]:
+Return JSON array.
+
+array[integer]:
+Return JSON array.
 
 Schema:
 
-{json.dumps(req.schema, indent=2)}
+{json.dumps(req.schema_, indent=2)}
 
 Text:
 
 {req.text}
-
-Return ONLY a valid JSON object.
-
-No markdown.
-No code fences.
-No explanation.
-No text before or after the JSON.
 """
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        temperature=0,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    )
-    
-    content = response.choices[0].message.content
-    print(content)
-    data = json.loads(content)
-    
-    result = {}
+        response = client.chat.completions.create(
+            model=MODEL,
+            temperature=0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
 
-    for key, typ in req.schema.items():
+        content = response.choices[0].message.content.strip()
 
-        value = data.get(key)
+        print(content)
 
-        if value is None:
-            result[key] = None
-            continue
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
 
-        try:
-            if typ == "string":
-                result[key] = str(value)
+        data = json.loads(content)
 
-            elif typ == "integer":
-                result[key] = int(value)
+        result = {}
 
-            elif typ == "float":
-                result[key] = float(value)
+        for key, typ in req.schema_.items():
 
-            elif typ == "boolean":
-                result[key] = bool(value)
+            value = data.get(key)
 
-            elif typ == "date":
-                result[key] = str(value)
+            if value is None:
+                result[key] = None
+                continue
 
-            elif typ == "array[string]":
-                result[key] = [str(x) for x in value]
+            try:
 
-            elif typ == "array[integer]":
-                result[key] = [int(x) for x in value]
+                if typ == "string":
+                    result[key] = clean_string(key, str(value))
 
-            else:
+                elif typ == "integer":
+                    result[key] = int(value)
+
+                elif typ == "float":
+                    result[key] = float(value)
+
+                elif typ == "boolean":
+                    result[key] = bool(value)
+
+                elif typ == "date":
+                    result[key] = str(value)
+
+                elif typ == "array[string]":
+                    result[key] = [str(x) for x in value]
+
+                elif typ == "array[integer]":
+                    result[key] = [int(x) for x in value]
+
+                else:
+                    result[key] = None
+
+            except Exception:
                 result[key] = None
 
-        except:
-            result[key] = None
+        return result
 
-    return result
+    except Exception:
+        print(traceback.format_exc())
+        raise
